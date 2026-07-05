@@ -1,4 +1,4 @@
-const BUILD = '2025-07-05.1'
+const BUILD = '2025-07-05.2'
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 
@@ -41,6 +41,9 @@ const App = {
     newHabitType: 'check',
     viewingDate: null,
     viewingDayData: null,
+    syncConflicts: null,      // Array<{ date, local, cloud, choice }> | null
+    syncConflictHabits: null, // habits from cloud, applied after conflicts resolved
+    syncMergePreview: null,   // { added, conflicts } counts
   },
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -246,7 +249,6 @@ const App = {
   },
 
   // ── Shared day fields renderer ─────────────────────────────────────────────
-  // prefix '' = today actions, prefix 'Past' = past-day actions
 
   renderDayFields(day, prefix, dateLabel) {
     const habits = this.state.habits
@@ -312,7 +314,6 @@ const App = {
       </div>
 
       <div class="grid-2" style="margin-top:18px;">
-        <!-- Water -->
         <div class="card" style="display:flex;flex-direction:column;gap:9px;">
           <div style="display:flex;align-items:center;gap:7px;">
             <span class="mi" style="font-size:19px;color:var(--accent)">water_drop</span>
@@ -327,7 +328,6 @@ const App = {
           </select>
         </div>
 
-        <!-- Steps -->
         <div class="card" style="display:flex;flex-direction:column;gap:9px;">
           <div style="display:flex;align-items:center;gap:7px;">
             <span class="mi" style="font-size:19px;color:var(--accent)">directions_walk</span>
@@ -348,7 +348,6 @@ const App = {
           </div>
         </div>
 
-        <!-- No-sugar -->
         <div class="toggle-card ${noSugarOn ? 'on' : ''}" onclick="App.toggle${prefix}('noSugar')">
           <div class="toggle-card-top">
             <span class="mi" style="font-size:22px;color:var(--accent)">cookie</span>
@@ -360,7 +359,6 @@ const App = {
           <div style="font-size:12px;color:var(--muted);font-weight:600;">Zero added sugar</div>
         </div>
 
-        <!-- Workout -->
         <div class="toggle-card ${workoutOn ? 'on' : ''}" onclick="App.toggle${prefix}('workout')">
           <div class="toggle-card-top">
             <span class="mi" style="font-size:22px;color:var(--accent)">exercise</span>
@@ -373,7 +371,6 @@ const App = {
         </div>
       </div>
 
-      <!-- Meals -->
       <div class="card" style="margin-top:12px;display:flex;flex-direction:column;gap:10px;">
         <div style="display:flex;align-items:center;gap:7px;">
           <span class="mi" style="font-size:19px;color:var(--accent)">restaurant</span>
@@ -438,7 +435,7 @@ const App = {
     this.updateProgressRing(this.state.today)
   },
 
-  // ── PAST DAY actions (history detail view) ─────────────────────────────────
+  // ── PAST DAY actions ───────────────────────────────────────────────────────
 
   setPastField(field, value) {
     this.state.viewingDayData[field] = value
@@ -682,7 +679,7 @@ const App = {
   // ── SYNC tab ───────────────────────────────────────────────────────────────
 
   renderSync() {
-    const { authStatus, userEmail, settings, syncing, syncMsg } = this.state
+    const { authStatus, userEmail, settings, syncing, syncMsg, syncConflicts, syncMergePreview } = this.state
     const connected = authStatus === 'connected'
     const needsClientId = AUTH.CLIENT_ID === 'YOUR_CLIENT_ID_HERE'
 
@@ -706,6 +703,8 @@ const App = {
           <li>Reload the app and tap <strong>Connect Google</strong></li>
         </ol>
       </div>`
+
+    const conflictsSection = syncConflicts ? this.renderConflictsSection(syncConflicts, syncMergePreview) : ''
 
     const connectedCard = `
       <div class="card" style="display:flex;align-items:center;gap:14px;">
@@ -740,14 +739,17 @@ const App = {
         </div>
       </div>
 
+      ${syncConflicts ? conflictsSection : `
       <button class="btn-primary" style="margin-top:16px;height:52px;font-size:16px;border-radius:14px;"
               onclick="App.doSync('upload')" ${syncing ? 'disabled' : ''}>
         ${syncing ? '<div class="spinner"></div> Syncing…' : '<span class="mi" style="font-size:21px;">cloud_upload</span> Upload to Sheets'}
       </button>
       <button class="btn-primary" style="margin-top:8px;height:52px;font-size:16px;border-radius:14px;background:#F2F2EF;color:var(--text);"
               onclick="App.doSync('download')" ${syncing ? 'disabled' : ''}>
-        ${syncing ? '' : '<span class="mi" style="font-size:21px;color:var(--accent);">cloud_download</span> Download from Sheets'}
+        ${syncing ? '<div class="spinner"></div>' : '<span class="mi" style="font-size:21px;color:var(--accent);">cloud_download</span> Download from Sheets'}
       </button>
+      `}
+
       <button onclick="App.disconnectGoogle()" style="margin-top:12px;width:100%;border:none;background:transparent;color:var(--muted);font-size:13px;font-weight:700;cursor:pointer;padding:8px;">
         Disconnect Google account
       </button>`
@@ -794,6 +796,172 @@ const App = {
       </div>`
   },
 
+  // ── Merge helpers ──────────────────────────────────────────────────────────
+
+  _hasAnyData(day) {
+    if (!day) return false
+    return !!(day.water || day.steps > 0 || day.noSugar || day.workout ||
+      day.breakfast || day.lunch || day.dinner ||
+      Object.values(day.habits || {}).some(v => v))
+  },
+
+  _daysEqual(a, b) {
+    if (!a && !b) return true
+    if (!a || !b) return false
+    return (a.water || '') === (b.water || '') &&
+      Number(a.steps || 0) === Number(b.steps || 0) &&
+      !!a.noSugar === !!b.noSugar &&
+      !!a.workout === !!b.workout &&
+      (a.breakfast || '') === (b.breakfast || '') &&
+      (a.lunch || '') === (b.lunch || '') &&
+      (a.dinner || '') === (b.dinner || '') &&
+      this._habitsEqual(a.habits || {}, b.habits || {})
+  },
+
+  _habitsEqual(a, b) {
+    const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+    for (const k of keys) {
+      if (String(a[k] || '') !== String(b[k] || '')) return false
+    }
+    return true
+  },
+
+  _getDiffs(local, cloud) {
+    const diffs = []
+    const fmt = v => v === true || v === 'Yes' ? 'Yes' : v === false || v === 'No' ? 'No' : (String(v || '') || '—')
+    const fields = [
+      { key: 'water', label: 'Water' },
+      { key: 'steps', label: 'Steps' },
+      { key: 'noSugar', label: 'No Sugar' },
+      { key: 'workout', label: 'Workout' },
+      { key: 'breakfast', label: 'Breakfast' },
+      { key: 'lunch', label: 'Lunch' },
+      { key: 'dinner', label: 'Dinner' },
+    ]
+    for (const f of fields) {
+      const lv = String(local[f.key] || ''), cv = String(cloud[f.key] || '')
+      if (lv !== cv) diffs.push({ field: f.label, localVal: fmt(local[f.key]), cloudVal: fmt(cloud[f.key]) })
+    }
+    const localH = local.habits || {}, cloudH = cloud.habits || {}
+    const habitKeys = new Set([...Object.keys(localH), ...Object.keys(cloudH)])
+    for (const id of habitKeys) {
+      if (String(localH[id] || '') !== String(cloudH[id] || '')) {
+        const habit = this.state.habits.find(h => h.id === id)
+        const label = habit ? (habit.name.length > 12 ? habit.name.slice(0, 11) + '…' : habit.name) : id
+        diffs.push({ field: label, localVal: fmt(localH[id]), cloudVal: fmt(cloudH[id]) })
+      }
+    }
+    return diffs
+  },
+
+  renderConflictsSection(conflicts, preview) {
+    const allResolved = conflicts.every(c => c.choice)
+    const previewMsg = preview
+      ? `${preview.added} day${preview.added !== 1 ? 's' : ''} merged automatically — ${preview.conflicts} conflict${preview.conflicts !== 1 ? 's' : ''} need your review.`
+      : `${conflicts.length} conflict${conflicts.length !== 1 ? 's' : ''} need your review.`
+
+    const cards = conflicts.map((c, idx) => {
+      const [y, m, d] = c.date.split('-').map(Number)
+      const dateLabel = new Date(y, m - 1, d).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
+      const diffs = this._getDiffs(c.local, c.cloud)
+      const diffRows = diffs.map(df => `
+        <div style="display:grid;grid-template-columns:90px 1fr 1fr;gap:6px;padding:7px 0;border-top:1px solid var(--divider);font-size:12px;align-items:center;">
+          <span style="color:var(--muted);font-weight:700;">${escHtml(df.field)}</span>
+          <span style="font-weight:700;${c.choice === 'local' ? 'color:var(--accent)' : ''}">${escHtml(df.localVal)}</span>
+          <span style="font-weight:700;${c.choice === 'cloud' ? 'color:var(--accent)' : ''}">${escHtml(df.cloudVal)}</span>
+        </div>`).join('')
+
+      return `
+        <div class="card" style="margin-top:8px;padding:0;overflow:hidden;">
+          <div style="padding:12px 14px 8px;display:flex;align-items:center;justify-content:space-between;">
+            <span style="font-size:14px;font-weight:800;">${escHtml(dateLabel)}</span>
+            ${c.choice ? `<span style="font-size:11px;font-weight:800;padding:3px 8px;border-radius:6px;background:var(--accent-light);color:var(--accent);">${c.choice === 'local' ? 'KEPT LOCAL' : 'USE CLOUD'}</span>` : ''}
+          </div>
+          <div style="padding:0 14px 4px;">
+            <div style="display:grid;grid-template-columns:90px 1fr 1fr;gap:6px;padding-bottom:4px;">
+              <span style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Field</span>
+              <span style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Local</span>
+              <span style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Cloud</span>
+            </div>
+            ${diffRows}
+          </div>
+          <div style="display:flex;gap:8px;padding:12px 14px;">
+            <button onclick="App.resolveConflict(${idx}, 'local')"
+              style="flex:1;height:36px;border-radius:10px;border:2px solid ${c.choice === 'local' ? 'var(--accent)' : 'var(--border)'};background:${c.choice === 'local' ? 'var(--accent-light)' : 'transparent'};color:${c.choice === 'local' ? 'var(--accent)' : 'var(--dim)'};font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;">
+              Keep Local
+            </button>
+            <button onclick="App.resolveConflict(${idx}, 'cloud')"
+              style="flex:1;height:36px;border-radius:10px;border:2px solid ${c.choice === 'cloud' ? 'var(--accent)' : 'var(--border)'};background:${c.choice === 'cloud' ? 'var(--accent-light)' : 'transparent'};color:${c.choice === 'cloud' ? 'var(--accent)' : 'var(--dim)'};font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;">
+              Use Cloud
+            </button>
+          </div>
+        </div>`
+    }).join('')
+
+    return `
+      <div style="margin-top:16px;">
+        <div style="font-size:13px;font-weight:700;color:#8A5A00;background:#FFF3CD;border:1px solid #F0D060;border-radius:var(--radius-sm);padding:12px 14px;">
+          <span class="mi" style="font-size:16px;vertical-align:middle;margin-right:6px;">merge_type</span>${escHtml(previewMsg)}
+        </div>
+        ${cards}
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          <button onclick="App.applyMerge('local')"
+            style="flex:1;height:40px;border-radius:10px;border:1px solid var(--border);background:var(--input);color:var(--dim);font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;">
+            All Local
+          </button>
+          <button onclick="App.applyMerge('cloud')"
+            style="flex:1;height:40px;border-radius:10px;border:1px solid var(--border);background:var(--input);color:var(--dim);font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;">
+            All Cloud
+          </button>
+          <button onclick="App.applyMerge(null)" ${!allResolved ? 'disabled' : ''}
+            style="flex:2;height:40px;border-radius:10px;border:none;background:${allResolved ? 'var(--accent)' : 'var(--border)'};color:${allResolved ? '#fff' : 'var(--muted)'};font-size:13px;font-weight:800;cursor:${allResolved ? 'pointer' : 'not-allowed'};font-family:inherit;-webkit-tap-highlight-color:transparent;">
+            Apply (${conflicts.filter(c => c.choice).length}/${conflicts.length})
+          </button>
+        </div>
+      </div>`
+  },
+
+  resolveConflict(idx, choice) {
+    const syncConflicts = this.state.syncConflicts.map((c, i) =>
+      i === idx ? { ...c, choice } : c
+    )
+    this.setState({ syncConflicts })
+  },
+
+  applyMerge(bulkChoice) {
+    const conflicts = this.state.syncConflicts
+    const logs = DB.getLogs()
+
+    for (const conflict of conflicts) {
+      const choice = bulkChoice || conflict.choice || 'local'
+      if (choice === 'cloud') {
+        logs[conflict.date] = conflict.cloud
+      }
+    }
+
+    if (this.state.syncConflictHabits) {
+      DB.saveHabits(this.state.syncConflictHabits)
+      this.state.habits = this.state.syncConflictHabits
+    }
+
+    DB.saveLogs(logs)
+    const todayLog = logs[todayKey()]
+    if (todayLog) this.state.today = todayLog
+
+    const settings = { ...this.state.settings, lastSyncedAt: Date.now() }
+    DB.saveSettings(settings)
+
+    this.setState({
+      syncConflicts: null,
+      syncConflictHabits: null,
+      syncMergePreview: null,
+      settings,
+      syncMsg: { type: 'ok', text: '✓ Merge complete. All conflicts resolved.' }
+    })
+  },
+
+  // ── Sync actions ───────────────────────────────────────────────────────────
+
   toggleAutoSync() {
     const settings = { ...this.state.settings, autoSync: !this.state.settings.autoSync }
     DB.saveSettings(settings)
@@ -801,6 +969,9 @@ const App = {
   },
 
   async doSync(direction) {
+    if (direction === 'download') return this.doDownload()
+
+    // Upload
     this.setState({ syncing: true, syncMsg: null })
     try {
       let token = AUTH.getToken()
@@ -817,28 +988,86 @@ const App = {
         this.state.settings = settings
       }
 
-      if (direction === 'upload') {
-        await SYNC.upload(token, spreadsheetId)
-      } else {
-        const data = await SYNC.download(token, spreadsheetId)
-        if (data.habits) { DB.saveHabits(data.habits); this.state.habits = data.habits }
-        if (data.logs) {
-          DB.saveLogs(data.logs)
-          const todayLog = data.logs[todayKey()]
-          this.state.today = todayLog || emptyDay()
-        }
-      }
+      await SYNC.upload(token, spreadsheetId)
 
       const settings = { ...this.state.settings, lastSyncedAt: Date.now() }
       DB.saveSettings(settings)
-      this.setState({
-        syncing: false,
-        settings,
-        syncMsg: { type: 'ok', text: direction === 'upload' ? '✓ Uploaded to Google Sheets.' : '✓ Data downloaded from Google Sheets.' }
-      })
+      this.setState({ syncing: false, settings, syncMsg: { type: 'ok', text: '✓ Uploaded to Google Sheets.' } })
     } catch (err) {
       console.error(err)
       this.setState({ syncing: false, syncMsg: { type: 'err', text: 'Sync failed: ' + err.message } })
+    }
+  },
+
+  async doDownload() {
+    this.setState({ syncing: true, syncMsg: null, syncConflicts: null, syncMergePreview: null })
+    try {
+      let token = AUTH.getToken()
+      if (!token) {
+        this.setState({ syncing: false, syncMsg: { type: 'err', text: 'Token expired. Please reconnect Google.' } })
+        return
+      }
+
+      let { spreadsheetId } = this.state.settings
+      if (!spreadsheetId) {
+        this.setState({ syncing: false, syncMsg: { type: 'err', text: 'No spreadsheet found. Upload first to create one.' } })
+        return
+      }
+
+      const data = await SYNC.download(token, spreadsheetId)
+      const localLogs = DB.getLogs()
+      const cloudLogs = data.logs || {}
+
+      // Split cloud days into conflict-free and conflicting
+      const newFromCloud = {}
+      const conflicts = []
+
+      for (const [date, cloudDay] of Object.entries(cloudLogs)) {
+        const localDay = localLogs[date]
+        if (!localDay || !this._hasAnyData(localDay)) {
+          // Cloud has data, local is empty → take cloud, no conflict
+          newFromCloud[date] = cloudDay
+        } else if (!this._daysEqual(localDay, cloudDay)) {
+          // Both have data and they differ → conflict
+          conflicts.push({ date, local: localDay, cloud: cloudDay, choice: null })
+        }
+        // else: identical → nothing to do
+      }
+
+      // Apply conflict-free cloud days immediately
+      const mergedLogs = { ...localLogs, ...newFromCloud }
+      DB.saveLogs(mergedLogs)
+
+      const settings = { ...this.state.settings, lastSyncedAt: Date.now() }
+      DB.saveSettings(settings)
+
+      if (conflicts.length === 0) {
+        // Fully resolved — apply habits too
+        if (data.habits && data.habits.length > 0) {
+          DB.saveHabits(data.habits)
+          this.state.habits = data.habits
+        }
+        const todayLog = mergedLogs[todayKey()]
+        if (todayLog) this.state.today = todayLog
+        const addedCount = Object.keys(newFromCloud).length
+        this.setState({
+          syncing: false,
+          settings,
+          syncMsg: { type: 'ok', text: `✓ Merge complete. ${addedCount} day${addedCount !== 1 ? 's' : ''} added from cloud.` }
+        })
+      } else {
+        // Conflicts need resolution — keep habits staged
+        this.setState({
+          syncing: false,
+          settings,
+          syncConflicts: conflicts,
+          syncConflictHabits: data.habits || null,
+          syncMergePreview: { added: Object.keys(newFromCloud).length, conflicts: conflicts.length }
+        })
+      }
+    } catch (err) {
+      console.error(err)
+      this.setState({ syncing: false, syncMsg: { type: 'err', text: 'Download failed: ' + err.message } })
     }
   },
 
@@ -854,7 +1083,7 @@ const App = {
     AUTH.disconnect()
     const settings = { ...this.state.settings, spreadsheetId: null }
     DB.saveSettings(settings)
-    this.setState({ authStatus: null, userEmail: null, settings })
+    this.setState({ authStatus: null, userEmail: null, settings, syncConflicts: null, syncMergePreview: null })
   },
 }
 
