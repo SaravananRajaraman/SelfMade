@@ -1,3 +1,5 @@
+const BUILD = '2025-07-05.1'
+
 // ── Utility ──────────────────────────────────────────────────────────────────
 
 function escHtml(s) {
@@ -785,7 +787,11 @@ const App = {
       </button>` : `
       <div style="margin-top:16px;text-align:center;font-size:12px;color:var(--muted);font-weight:600;">
         Installable as a PWA — add to home screen, log offline, sync later.
-      </div>`}`
+      </div>`}
+
+      <div style="margin-top:24px;text-align:center;font-size:11px;color:var(--muted);font-weight:700;letter-spacing:0.05em;">
+        BUILD ${escHtml(BUILD)}
+      </div>`
   },
 
   toggleAutoSync() {
