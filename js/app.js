@@ -29,14 +29,16 @@ const App = {
     today: null,
     habits: [],
     settings: {},
-    authStatus: null,    // null | 'connected'
+    authStatus: null,
     userEmail: null,
     syncing: false,
-    syncMsg: null,       // { type: 'ok'|'err', text }
+    syncMsg: null,
     histYear: new Date().getFullYear(),
     histMonth: new Date().getMonth(),
     newHabitName: '',
     newHabitType: 'check',
+    viewingDate: null,
+    viewingDayData: null,
   },
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -71,13 +73,25 @@ const App = {
     DB.saveLogs(logs)
   },
 
+  savePastDay() {
+    const logs = DB.getLogs()
+    logs[this.state.viewingDate] = this.state.viewingDayData
+    DB.saveLogs(logs)
+  },
+
   // ── Tab routing ────────────────────────────────────────────────────────────
 
   switchTab(tab) {
-    if (this.state.tab === tab) return
+    if (this.state.tab === tab) {
+      if (tab === 'history' && this.state.viewingDate) {
+        this.setState({ viewingDate: null, viewingDayData: null })
+      }
+      return
+    }
     this.state.tab = tab
     this.state.syncMsg = null
-    // Update tab bar active state
+    this.state.viewingDate = null
+    this.state.viewingDayData = null
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.tab === tab)
     })
@@ -90,7 +104,6 @@ const App = {
   render() {
     document.getElementById('content').innerHTML = this.renderTab()
     this.afterRender()
-    // Sync tab bar active state
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.tab === this.state.tab)
     })
@@ -106,14 +119,12 @@ const App = {
     }
   },
 
-  afterRender() {
-    // Restore focus/scroll — nothing needed for now
-  },
+  afterRender() {},
 
   // ── Progress helpers ───────────────────────────────────────────────────────
 
-  progressStats() {
-    const day = this.state.today
+  progressStats(day) {
+    day = day || this.state.today
     const habits = this.state.habits
     let done = 0, total = 0
 
@@ -142,6 +153,20 @@ const App = {
     if (pct >= 0.4) return 'Making progress. Keep it up!'
     if (pct > 0) return 'Good start — keep going!'
     return 'Start strong today!'
+  },
+
+  updateProgressRing(day) {
+    const { pct } = this.progressStats(day)
+    const pctLabel = Math.round(pct * 100) + '%'
+    const ringOffset = (213.6 * (1 - pct)).toFixed(1)
+    const msg = this.progressMsg(pct)
+
+    const circle = document.querySelector('[data-ring-progress]')
+    if (circle) circle.setAttribute('stroke-dashoffset', ringOffset)
+    const ringCenter = document.querySelector('[data-ring-pct]')
+    if (ringCenter) ringCenter.textContent = pctLabel
+    const msgEl = document.querySelector('[data-progress-msg]')
+    if (msgEl) msgEl.textContent = msg
   },
 
   scoreDay(log) {
@@ -200,7 +225,7 @@ const App = {
       }
       if (isToday) ring = `0 0 0 2px #2A6FDB`
 
-      cells.push({ label: d, bg, color, ring })
+      cells.push({ label: d, bg, color, ring, key, clickable: isPast || isToday })
     }
     return cells
   },
@@ -218,23 +243,17 @@ const App = {
     return { great, logged }
   },
 
-  // ── TODAY tab ──────────────────────────────────────────────────────────────
+  // ── Shared day fields renderer ─────────────────────────────────────────────
+  // prefix '' = today actions, prefix 'Past' = past-day actions
 
-  renderToday() {
-    const day = this.state.today
+  renderDayFields(day, prefix, dateLabel) {
     const habits = this.state.habits
-    const { done, total, pct } = this.progressStats()
+    const { pct } = this.progressStats(day)
     const msg = this.progressMsg(pct)
     const pctLabel = Math.round(pct * 100) + '%'
     const ringOffset = (213.6 * (1 - pct)).toFixed(1)
 
-    const today = new Date()
-    const dateStr = today.toLocaleDateString('en-US', {
-      weekday: 'short', month: 'short', day: 'numeric'
-    }).toUpperCase()
-
     const waterLabel = day.water ? day.water.replace('L', ' L') : '— L'
-
     const noSugarOn = day.noSugar
     const workoutOn = day.workout
 
@@ -243,7 +262,7 @@ const App = {
       if (h.type === 'check') {
         const on = !!val
         return `
-          <div class="habit-row" onclick="App.toggleHabit('${h.id}')">
+          <div class="habit-row" onclick="App.toggle${prefix}Habit('${h.id}')">
             <div style="font-size:15px;font-weight:700;">${escHtml(h.name)}</div>
             <div class="chk ${on ? 'on' : ''}">
               ${on ? '<span class="mi fill" style="font-size:15px">check</span>' : ''}
@@ -254,7 +273,7 @@ const App = {
         <div class="habit-row-text">
           <div style="font-size:15px;font-weight:700;">${escHtml(h.name)}</div>
           <input type="text" value="${escHtml(val || '')}" placeholder="Write it down…"
-                 oninput="App.onHabitText('${h.id}', this.value)">
+                 oninput="App.on${prefix}HabitText('${h.id}', this.value)">
         </div>`
     }).join('')
 
@@ -274,18 +293,19 @@ const App = {
     return `
       <div style="display:flex;align-items:center;justify-content:space-between;gap:16px;">
         <div>
-          <div style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">${dateStr}</div>
+          <div style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.1em;">${escHtml(dateLabel)}</div>
           <div class="page-title">SelfMade</div>
-          <div style="font-size:14px;color:var(--accent);font-weight:700;max-width:180px;">${msg}</div>
+          <div style="font-size:14px;color:var(--accent);font-weight:700;max-width:180px;" data-progress-msg>${escHtml(msg)}</div>
         </div>
         <div class="ring-wrap">
           <svg width="84" height="84" viewBox="0 0 84 84">
             <circle cx="42" cy="42" r="34" fill="none" stroke="#E4E4E0" stroke-width="9"/>
             <circle cx="42" cy="42" r="34" fill="none" stroke="var(--accent)" stroke-width="9"
                     stroke-linecap="round" stroke-dasharray="213.6" stroke-dashoffset="${ringOffset}"
-                    transform="rotate(-90 42 42)" style="transition:stroke-dashoffset 0.4s;"/>
+                    transform="rotate(-90 42 42)" style="transition:stroke-dashoffset 0.4s;"
+                    data-ring-progress/>
           </svg>
-          <div class="ring-center">${pctLabel}</div>
+          <div class="ring-center" data-ring-pct>${pctLabel}</div>
         </div>
       </div>
 
@@ -297,7 +317,7 @@ const App = {
             <span class="section-label">Water</span>
           </div>
           <div class="sora" style="font-size:23px;font-weight:800;color:var(--accent);">${waterLabel}</div>
-          <select onchange="App.setField('water', this.value)">
+          <select onchange="App.set${prefix}Field('water', this.value)">
             <option value="" ${!day.water ? 'selected' : ''}>Log intake…</option>
             ${['2L','2.5L','3L','3.5L','4L','4.5L','5L'].map(v =>
               `<option value="${v}" ${day.water === v ? 'selected' : ''}>${v.replace('L', ' L')}</option>`
@@ -316,18 +336,18 @@ const App = {
           </div>
           <div style="display:flex;gap:8px;">
             <button class="btn-icon" style="flex:1;height:34px;border-radius:10px;background:var(--input);color:var(--text);"
-                    onclick="App.adjustSteps(-1000)">
+                    onclick="App.adjust${prefix}Steps(-1000)">
               <span class="mi">remove</span>
             </button>
             <button class="btn-icon" style="flex:1;height:34px;border-radius:10px;background:var(--accent);color:#fff;"
-                    onclick="App.adjustSteps(1000)">
+                    onclick="App.adjust${prefix}Steps(1000)">
               <span class="mi">add</span>
             </button>
           </div>
         </div>
 
         <!-- No-sugar -->
-        <div class="toggle-card ${noSugarOn ? 'on' : ''}" onclick="App.toggle('noSugar')">
+        <div class="toggle-card ${noSugarOn ? 'on' : ''}" onclick="App.toggle${prefix}('noSugar')">
           <div class="toggle-card-top">
             <span class="mi" style="font-size:22px;color:var(--accent)">cookie</span>
             <div class="chk ${noSugarOn ? 'on' : ''}">
@@ -339,7 +359,7 @@ const App = {
         </div>
 
         <!-- Workout -->
-        <div class="toggle-card ${workoutOn ? 'on' : ''}" onclick="App.toggle('workout')">
+        <div class="toggle-card ${workoutOn ? 'on' : ''}" onclick="App.toggle${prefix}('workout')">
           <div class="toggle-card-top">
             <span class="mi" style="font-size:22px;color:var(--accent)">exercise</span>
             <div class="chk ${workoutOn ? 'on' : ''}">
@@ -358,14 +378,24 @@ const App = {
           <span class="section-label">Meals</span>
         </div>
         <input type="text" value="${escHtml(day.breakfast)}" placeholder="Breakfast — what did you eat?"
-               oninput="App.onMeal('breakfast', this.value)">
+               oninput="App.on${prefix}Meal('breakfast', this.value)">
         <input type="text" value="${escHtml(day.lunch)}" placeholder="Lunch — what did you eat?"
-               oninput="App.onMeal('lunch', this.value)">
+               oninput="App.on${prefix}Meal('lunch', this.value)">
         <input type="text" value="${escHtml(day.dinner)}" placeholder="Dinner — what did you eat?"
-               oninput="App.onMeal('dinner', this.value)">
+               oninput="App.on${prefix}Meal('dinner', this.value)">
       </div>
 
       ${habitsSection}`
+  },
+
+  // ── TODAY tab ──────────────────────────────────────────────────────────────
+
+  renderToday() {
+    const today = new Date()
+    const dateStr = today.toLocaleDateString('en-US', {
+      weekday: 'short', month: 'short', day: 'numeric'
+    }).toUpperCase()
+    return this.renderDayFields(this.state.today, '', dateStr)
   },
 
   // ── TODAY actions ──────────────────────────────────────────────────────────
@@ -391,11 +421,11 @@ const App = {
   onMeal(field, value) {
     this.state.today[field] = value
     this.saveToday()
+    this.updateProgressRing(this.state.today)
   },
 
   toggleHabit(id) {
-    const habits = this.state.today.habits
-    habits[id] = !habits[id]
+    this.state.today.habits[id] = !this.state.today.habits[id]
     this.saveToday()
     this.render()
   },
@@ -403,11 +433,55 @@ const App = {
   onHabitText(id, value) {
     this.state.today.habits[id] = value
     this.saveToday()
+    this.updateProgressRing(this.state.today)
+  },
+
+  // ── PAST DAY actions (history detail view) ─────────────────────────────────
+
+  setPastField(field, value) {
+    this.state.viewingDayData[field] = value
+    this.savePastDay()
+    this.render()
+  },
+
+  togglePast(field) {
+    this.state.viewingDayData[field] = !this.state.viewingDayData[field]
+    this.savePastDay()
+    this.render()
+  },
+
+  adjustPastSteps(delta) {
+    this.state.viewingDayData.steps = Math.max(0, this.state.viewingDayData.steps + delta)
+    this.savePastDay()
+    this.render()
+  },
+
+  onPastMeal(field, value) {
+    this.state.viewingDayData[field] = value
+    this.savePastDay()
+    this.updateProgressRing(this.state.viewingDayData)
+  },
+
+  togglePastHabit(id) {
+    this.state.viewingDayData.habits[id] = !this.state.viewingDayData.habits[id]
+    this.savePastDay()
+    this.render()
+  },
+
+  onPastHabitText(id, value) {
+    this.state.viewingDayData.habits[id] = value
+    this.savePastDay()
+    this.updateProgressRing(this.state.viewingDayData)
   },
 
   // ── HISTORY tab ────────────────────────────────────────────────────────────
 
   renderHistory() {
+    if (this.state.viewingDate) return this.renderDayDetail()
+    return this.renderCalendar()
+  },
+
+  renderCalendar() {
     const { histYear: year, histMonth: month } = this.state
     const streak = this.calcStreak()
     const streakLabel = streak === 1 ? '1 day' : `${streak} day`
@@ -423,11 +497,14 @@ const App = {
 
     const dayCells = cells.map(c => {
       if (c.empty) return `<div></div>`
-      return `<div class="cal-cell" style="background:${c.bg};color:${c.color};${c.ring ? `box-shadow:${c.ring};` : ''}">${c.label}</div>`
+      if (c.clickable) {
+        return `<div class="cal-cell" onclick="App.selectCalendarDay('${c.key}')"
+          style="background:${c.bg};color:${c.color};${c.ring ? `box-shadow:${c.ring};` : ''}cursor:pointer;">${c.label}</div>`
+      }
+      return `<div class="cal-cell" style="background:${c.bg};color:${c.color};">${c.label}</div>`
     }).join('')
 
     const now = new Date()
-    const canPrev = true
     const canNext = year < now.getFullYear() || (year === now.getFullYear() && month < now.getMonth())
 
     return `
@@ -454,7 +531,10 @@ const App = {
           </button>
         </div>
         <div class="cal-grid">${dayHeaders}${dayCells}</div>
-        <div style="margin-top:18px;display:flex;justify-content:center;gap:16px;flex-wrap:wrap;">
+        <div style="margin-top:14px;text-align:center;font-size:12px;color:var(--muted);font-weight:600;">
+          Tap a day to view or edit
+        </div>
+        <div style="margin-top:14px;display:flex;justify-content:center;gap:16px;flex-wrap:wrap;">
           <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);font-weight:700;">
             <div class="leg-dot" style="background:#2A6FDB;"></div>Great day
           </div>
@@ -477,6 +557,37 @@ const App = {
           <div style="font-size:12px;color:var(--muted);font-weight:700;">days logged</div>
         </div>
       </div>`
+  },
+
+  selectCalendarDay(key) {
+    if (key === todayKey()) {
+      this.switchTab('today')
+      return
+    }
+    const logs = DB.getLogs()
+    const dayData = logs[key] ? { ...logs[key] } : emptyDay()
+    if (!dayData.habits) dayData.habits = {}
+    this.setState({ viewingDate: key, viewingDayData: dayData })
+  },
+
+  renderDayDetail() {
+    const key = this.state.viewingDate
+    const data = this.state.viewingDayData
+    const [y, m, d] = key.split('-').map(Number)
+    const dateObj = new Date(y, m - 1, d)
+    const dateStr = dateObj.toLocaleDateString('en-US', {
+      weekday: 'short', month: 'short', day: 'numeric', year: 'numeric'
+    }).toUpperCase()
+
+    return `
+      <button onclick="App.backToCalendar()" style="display:flex;align-items:center;gap:6px;border:none;background:transparent;color:var(--accent);font-size:14px;font-weight:800;cursor:pointer;padding:0;margin-bottom:16px;font-family:inherit;-webkit-tap-highlight-color:transparent;">
+        <span class="mi" style="font-size:20px;">arrow_back</span> History
+      </button>
+      ${this.renderDayFields(data, 'Past', dateStr)}`
+  },
+
+  backToCalendar() {
+    this.setState({ viewingDate: null, viewingDayData: null })
   },
 
   histNav(dir) {
@@ -511,8 +622,6 @@ const App = {
         No habits yet. Add one below.
       </div>`
 
-    const addDisabled = ''
-
     return `
       <div class="page-title">Habits</div>
       <div style="font-size:13px;color:var(--muted);font-weight:600;margin-top:4px;">
@@ -531,7 +640,7 @@ const App = {
             <button class="pill-btn ${newHabitType === 'check' ? 'on' : ''}" onclick="App.setHabitType('check')">Checkbox</button>
             <button class="pill-btn ${newHabitType === 'text' ? 'on' : ''}" onclick="App.setHabitType('text')">Text entry</button>
           </div>
-          <button class="btn-primary" style="margin-top:10px;" onclick="App.addHabit()" ${addDisabled}>
+          <button class="btn-primary" style="margin-top:10px;" onclick="App.addHabit()">
             <span class="mi fill" style="font-size:19px;">add</span> Add habit
           </button>
         </div>
@@ -540,7 +649,6 @@ const App = {
 
   onNewHabitName(value) {
     this.state.newHabitName = value
-    // Re-render only the add button disabled state — full re-render is fine here
   },
 
   setHabitType(type) {
@@ -563,7 +671,6 @@ const App = {
   removeHabit(id) {
     const habits = this.state.habits.filter(h => h.id !== id)
     DB.saveHabits(habits)
-    // Remove from today's log too
     const today = this.state.today
     delete today.habits[id]
     this.saveToday()
