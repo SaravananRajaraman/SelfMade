@@ -1,4 +1,4 @@
-const CACHE = 'selfmade-v1'
+const CACHE = 'selfmade-v2'
 const ASSETS = [
   './',
   './index.html',

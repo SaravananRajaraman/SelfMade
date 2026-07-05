@@ -671,9 +671,14 @@ const App = {
 
       ${syncMsgHtml}
 
+      ${_installPrompt ? `
+      <button class="btn-primary" style="margin-top:16px;height:52px;font-size:16px;border-radius:14px;background:#1A1A1A;"
+              onclick="App.installPWA()">
+        <span class="mi fill" style="font-size:21px;">install_mobile</span> Add to Home Screen
+      </button>` : `
       <div style="margin-top:16px;text-align:center;font-size:12px;color:var(--muted);font-weight:600;">
         Installable as a PWA — add to home screen, log offline, sync later.
-      </div>`
+      </div>`}`
   },
 
   toggleAutoSync() {
@@ -724,6 +729,14 @@ const App = {
     }
   },
 
+  async installPWA() {
+    if (!_installPrompt) return
+    _installPrompt.prompt()
+    await _installPrompt.userChoice
+    _installPrompt = null
+    this.render()
+  },
+
   disconnectGoogle() {
     AUTH.disconnect()
     const settings = { ...this.state.settings, spreadsheetId: null }
@@ -733,5 +746,18 @@ const App = {
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────────
+
+let _installPrompt = null
+
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault()
+  _installPrompt = e
+  App.render()
+})
+
+window.addEventListener('appinstalled', () => {
+  _installPrompt = null
+  App.render()
+})
 
 document.addEventListener('DOMContentLoaded', () => App.init())
