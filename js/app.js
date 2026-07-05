@@ -1,4 +1,4 @@
-const BUILD = '2025-07-05.2'
+const BUILD = '2025-07-05.3'
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 
@@ -63,6 +63,7 @@ const App = {
 
     this.render()
     AUTH.init()
+    NOTIF.init()
   },
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -782,6 +783,8 @@ const App = {
 
       ${syncMsgHtml}
 
+      ${this.renderNotifCard()}
+
       ${_installPrompt ? `
       <button class="btn-primary" style="margin-top:16px;height:52px;font-size:16px;border-radius:14px;background:#1A1A1A;"
               onclick="App.installPWA()">
@@ -958,6 +961,57 @@ const App = {
       settings,
       syncMsg: { type: 'ok', text: '✓ Merge complete. All conflicts resolved.' }
     })
+  },
+
+  // ── Notification card ──────────────────────────────────────────────────────
+
+  renderNotifCard() {
+    const perm = NOTIF.permission
+    const enabled = NOTIF.isEnabled() && perm === 'granted'
+    const unsupported = perm === 'unsupported'
+    const denied = perm === 'denied'
+
+    const times = ['7:00 AM', '10:00 AM', '1:00 PM', '5:00 PM', '8:00 PM']
+    const timeChips = times.map(t =>
+      `<span style="padding:3px 9px;border-radius:20px;background:${enabled ? 'var(--accent-light)' : 'var(--input)'};color:${enabled ? 'var(--accent)' : 'var(--muted)'};font-size:12px;font-weight:700;">${t}</span>`
+    ).join('')
+
+    const deniedNote = denied ? `
+      <div style="margin-top:10px;font-size:12px;color:#A3200F;font-weight:600;line-height:1.5;">
+        Notifications blocked. Enable them in Chrome → Settings → Site Settings → Notifications.
+      </div>` : ''
+
+    return `
+      <div class="card" style="margin-top:16px;padding:0;overflow:hidden;">
+        <div class="row-sep">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span class="mi ${enabled ? 'fill' : ''}" style="font-size:22px;color:var(--accent)">notifications${enabled ? '' : '_off'}</span>
+            <div>
+              <div style="font-size:15px;font-weight:800;">Daily Reminders</div>
+              <div style="font-size:12px;color:var(--muted);font-weight:600;">${unsupported ? 'Not supported in this browser' : enabled ? 'Active' : 'Off'}</div>
+            </div>
+          </div>
+          ${unsupported ? '' : `<button class="t-switch ${enabled ? 'on' : ''}" onclick="App.toggleNotif()"></button>`}
+        </div>
+        <div style="padding:4px 16px 14px;display:flex;flex-wrap:wrap;gap:6px;">
+          ${timeChips}
+        </div>
+        ${denied ? `<div style="padding:0 16px 14px;font-size:12px;color:#A3200F;font-weight:600;line-height:1.5;">Blocked in browser — go to Chrome → Site Settings → Notifications to allow.</div>` : ''}
+      </div>`
+  },
+
+  async toggleNotif() {
+    if (NOTIF.isEnabled()) {
+      NOTIF.disable()
+      this.render()
+    } else {
+      const result = await NOTIF.enable()
+      if (result === 'denied') {
+        this.render()
+      } else if (result === 'granted') {
+        this.render()
+      }
+    }
   },
 
   // ── Sync actions ───────────────────────────────────────────────────────────

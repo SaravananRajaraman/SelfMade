@@ -1,4 +1,4 @@
-const CACHE = 'selfmade-v4'
+const CACHE = 'selfmade-v5'
 const ASSETS = [
   './',
   './index.html',
@@ -7,6 +7,7 @@ const ASSETS = [
   './js/auth.js',
   './js/sync.js',
   './js/app.js',
+  './js/notifications.js',
   './icons/icon.svg',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -31,7 +32,6 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return
   const url = new URL(e.request.url)
-  // Network-first for Google APIs; cache-first for app assets
   if (url.hostname.includes('googleapis') || url.hostname.includes('accounts.google')) {
     return
   }
@@ -44,6 +44,18 @@ self.addEventListener('fetch', e => {
         }
         return resp
       }).catch(() => cached)
+    })
+  )
+})
+
+self.addEventListener('notificationclick', e => {
+  e.notification.close()
+  e.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
+      for (const client of list) {
+        if ('focus' in client) return client.focus()
+      }
+      return clients.openWindow('./')
     })
   )
 })
