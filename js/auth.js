@@ -2,11 +2,11 @@
 // Replace YOUR_CLIENT_ID_HERE with your Google Cloud OAuth 2.0 Web client ID.
 
 const AUTH = {
-  CLIENT_ID: 'YOUR_CLIENT_ID_HERE',
+  CLIENT_ID: '967954261282-q9v8gat87qacqfm33f5tj7mhvbm2jvd0.apps.googleusercontent.com',
   _client: null,
 
   init() {
-    if (this.CLIENT_ID === 'YOUR_CLIENT_ID_HERE') return
+    if (this.CLIENT_ID === '967954261282-q9v8gat87qacqfm33f5tj7mhvbm2jvd0.apps.googleusercontent.com') return
 
     const gisReady = () => {
       this._client = google.accounts.oauth2.initTokenClient({
