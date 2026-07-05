@@ -1,4 +1,4 @@
-const BUILD = '2025-07-05.3'
+const BUILD = '2025-07-05.4'
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 
@@ -44,6 +44,7 @@ const App = {
     syncConflicts: null,      // Array<{ date, local, cloud, choice }> | null
     syncConflictHabits: null, // habits from cloud, applied after conflicts resolved
     syncMergePreview: null,   // { added, conflicts } counts
+    syncSheetUrl: '',         // user-pasted sheet URL when no spreadsheetId stored
   },
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -740,6 +741,17 @@ const App = {
         </div>
       </div>
 
+      ${!settings.spreadsheetId ? `
+      <div class="card" style="margin-top:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;">
+        <div style="font-size:13px;font-weight:800;color:var(--dim);">Link existing sheet</div>
+        <div style="font-size:12px;color:var(--muted);font-weight:600;line-height:1.5;">
+          No sheet linked yet. Upload to create one, or paste your existing sheet URL to download from it.
+        </div>
+        <input type="text" value="${escHtml(this.state.syncSheetUrl)}" placeholder="Paste Google Sheet URL…"
+               oninput="App.onSheetUrl(this.value)"
+               style="font-size:13px;">
+      </div>` : ''}
+
       ${syncConflicts ? conflictsSection : `
       <button class="btn-primary" style="margin-top:16px;height:52px;font-size:16px;border-radius:14px;"
               onclick="App.doSync('upload')" ${syncing ? 'disabled' : ''}>
@@ -797,6 +809,22 @@ const App = {
       <div style="margin-top:24px;text-align:center;font-size:11px;color:var(--muted);font-weight:700;letter-spacing:0.05em;">
         BUILD ${escHtml(BUILD)}
       </div>`
+  },
+
+  // ── Sheet linking ──────────────────────────────────────────────────────────
+
+  _extractSheetId(urlOrId) {
+    if (!urlOrId || !urlOrId.trim()) return null
+    const match = urlOrId.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)
+    if (match) return match[1]
+    // Accept raw ID (44-char alphanumeric) as a fallback
+    const raw = urlOrId.trim()
+    if (/^[a-zA-Z0-9-_]{20,}$/.test(raw)) return raw
+    return null
+  },
+
+  onSheetUrl(value) {
+    this.state.syncSheetUrl = value
   },
 
   // ── Merge helpers ──────────────────────────────────────────────────────────
@@ -1064,8 +1092,16 @@ const App = {
 
       let { spreadsheetId } = this.state.settings
       if (!spreadsheetId) {
-        this.setState({ syncing: false, syncMsg: { type: 'err', text: 'No spreadsheet found. Upload first to create one.' } })
-        return
+        // Try to extract from a pasted URL
+        spreadsheetId = this._extractSheetId(this.state.syncSheetUrl)
+        if (!spreadsheetId) {
+          this.setState({ syncing: false, syncMsg: { type: 'err', text: 'Paste your Google Sheet URL below and try again.' } })
+          return
+        }
+        // Save the found ID so future syncs work
+        const settings = { ...this.state.settings, spreadsheetId }
+        DB.saveSettings(settings)
+        this.state.settings = settings
       }
 
       const data = await SYNC.download(token, spreadsheetId)
