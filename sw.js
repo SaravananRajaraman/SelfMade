@@ -1,6 +1,6 @@
 importScripts('./js/notif-shared.js')
 
-const CACHE = 'selfmade-v7'
+const CACHE = 'selfmade-v8'
 const ASSETS = [
   './',
   './index.html',

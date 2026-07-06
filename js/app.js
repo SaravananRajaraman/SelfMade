@@ -1,4 +1,4 @@
-const BUILD = '2026-07-06.5'
+const BUILD = '2026-07-06.6'
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 
@@ -780,7 +780,14 @@ const App = {
   async _resolveSheet(token) {
     let spreadsheetId = this.state.settings.spreadsheetId
     if (!spreadsheetId) spreadsheetId = this._extractSheetId(this.state.syncSheetUrl)
-    if (!spreadsheetId) spreadsheetId = await SYNC.findSpreadsheet(token)
+    if (!spreadsheetId) {
+      try {
+        spreadsheetId = await SYNC.findSpreadsheet(token)
+      } catch (_) {
+        // Drive API not enabled — skip lookup, go straight to create.
+        // If the user has an existing sheet, they can paste the URL below.
+      }
+    }
     if (!spreadsheetId) spreadsheetId = await SYNC.createSpreadsheet(token)
     if (spreadsheetId !== this.state.settings.spreadsheetId) {
       const settings = { ...this.state.settings, spreadsheetId }
@@ -896,9 +903,9 @@ const App = {
 
       ${!settings.spreadsheetId ? `
       <div class="card" style="margin-top:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;">
-        <div style="font-size:13px;font-weight:800;color:var(--dim);">Link existing sheet (optional)</div>
+        <div style="font-size:13px;font-weight:800;color:var(--dim);">Link existing sheet</div>
         <div style="font-size:12px;color:var(--muted);font-weight:600;line-height:1.5;">
-          Your sheet is found automatically. Only paste a URL here if you want to use a specific one.
+          Already have a SelfMade sheet? Paste its URL here — otherwise a new sheet will be created automatically.
         </div>
         <input type="text" value="${escHtml(this.state.syncSheetUrl)}" placeholder="Paste Google Sheet URL…"
                oninput="App.onSheetUrl(this.value)"
