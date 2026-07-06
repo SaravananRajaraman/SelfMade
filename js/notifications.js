@@ -1,13 +1,5 @@
 const NOTIF = {
-  SCHEDULE: [
-    { hour: 7,  min: 0, title: 'SelfMade · Morning',     body: 'Good morning! Log your breakfast and start strong.' },
-    { hour: 10, min: 0, title: 'SelfMade · Check-in',    body: 'Mid-morning reminder — water and steps on track?' },
-    { hour: 13, min: 0, title: 'SelfMade · Lunch',       body: 'Lunchtime! Don\'t forget to log your meal.' },
-    { hour: 17, min: 0, title: 'SelfMade · Check-in',    body: 'Afternoon check — how\'s your step count?' },
-    { hour: 20, min: 0, title: 'SelfMade · Evening',     body: 'Time to wrap up — fill in anything you missed today.' },
-  ],
-
-  _timers: [],
+  _timer: null,
 
   get permission() {
     if (!('Notification' in window)) return 'unsupported'
@@ -20,6 +12,7 @@ const NOTIF = {
 
   _setEnabled(val) {
     localStorage.setItem('selfmade_notif', val ? '1' : '0')
+    NOTIF_STORE.setEnabled(val)
   },
 
   async enable() {
@@ -29,62 +22,67 @@ const NOTIF = {
     if (result !== 'granted') return result
     this._setEnabled(true)
     this.schedule()
+    this._registerPeriodicSync()
     return 'granted'
   },
 
   disable() {
     this._setEnabled(false)
-    this._clearTimers()
+    this._stop()
+    this._unregisterPeriodicSync()
   },
 
-  _clearTimers() {
-    this._timers.forEach(t => clearTimeout(t))
-    this._timers = []
+  _stop() {
+    if (this._timer) { clearInterval(this._timer); this._timer = null }
   },
 
-  async schedule() {
-    this._clearTimers()
+  // Check every minute (and immediately) whether a reminder is due.
+  // A repeating check survives tab freezes/throttling better than one
+  // long setTimeout per slot — the first tick after unfreeze catches up.
+  schedule() {
+    this._stop()
     if (!this.isEnabled() || this.permission !== 'granted') return
+    const check = () => this._check()
+    check()
+    this._timer = setInterval(check, 60 * 1000)
+  },
 
-    const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.ready : null
-    const now = new Date()
-
-    for (const slot of this.SCHEDULE) {
-      const target = new Date()
-      target.setHours(slot.hour, slot.min, 0, 0)
-      const delay = target - now
-      if (delay <= 0) continue
-
-      const { title, body } = slot
-      const t = setTimeout(async () => {
-        try {
-          if (reg) {
-            await reg.showNotification(title, {
-              body,
-              icon: './icons/icon-192.png',
-              badge: './icons/icon-192.png',
-              tag: `selfmade-${slot.hour}`,
-            })
-          } else {
-            new Notification(title, { body, icon: './icons/icon-192.png' })
-          }
-        } catch (e) {
-          console.warn('Notification failed', e)
-        }
-      }, delay)
-      this._timers.push(t)
+  async _check() {
+    if (!this.isEnabled() || this.permission !== 'granted') return
+    try {
+      const reg = 'serviceWorker' in navigator ? await navigator.serviceWorker.ready : null
+      await showDueNotifications(reg)
+    } catch (e) {
+      console.warn('Notification check failed', e)
     }
+  },
 
-    // Reschedule at midnight for the next day
-    const midnight = new Date()
-    midnight.setHours(24, 0, 5, 0)
-    const midnightTimer = setTimeout(() => this.schedule(), midnight - now)
-    this._timers.push(midnightTimer)
+  // Periodic Background Sync lets the service worker fire reminders while
+  // the app is closed (installed PWA on Android Chrome; best-effort elsewhere).
+  async _registerPeriodicSync() {
+    try {
+      const reg = await navigator.serviceWorker.ready
+      if ('periodicSync' in reg) {
+        await reg.periodicSync.register('selfmade-reminders', { minInterval: 60 * 60 * 1000 })
+      }
+    } catch (_) {}
+  },
+
+  async _unregisterPeriodicSync() {
+    try {
+      const reg = await navigator.serviceWorker.ready
+      if ('periodicSync' in reg) await reg.periodicSync.unregister('selfmade-reminders')
+    } catch (_) {}
   },
 
   init() {
     if (this.isEnabled() && this.permission === 'granted') {
+      NOTIF_STORE.setEnabled(true) // backfill the SW-visible flag for existing users
       this.schedule()
+      this._registerPeriodicSync()
     }
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') this.schedule()
+    })
   },
 }

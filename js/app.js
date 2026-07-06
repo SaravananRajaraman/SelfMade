@@ -1,4 +1,4 @@
-const BUILD = '2025-07-05.4'
+const BUILD = '2026-07-06.5'
 
 // ── Utility ──────────────────────────────────────────────────────────────────
 
@@ -20,7 +20,7 @@ function dateKey(d) {
 }
 
 function emptyDay() {
-  return { water: '', steps: 0, noSugar: false, workout: false, breakfast: '', lunch: '', dinner: '', habits: {} }
+  return { water: '', steps: 0, noSugar: false, workout: false, protein: false, sleep: false, breakfast: '', lunch: '', dinner: '', habits: {} }
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -41,9 +41,6 @@ const App = {
     newHabitType: 'check',
     viewingDate: null,
     viewingDayData: null,
-    syncConflicts: null,      // Array<{ date, local, cloud, choice }> | null
-    syncConflictHabits: null, // habits from cloud, applied after conflicts resolved
-    syncMergePreview: null,   // { added, conflicts } counts
     syncSheetUrl: '',         // user-pasted sheet URL when no spreadsheetId stored
   },
 
@@ -65,6 +62,18 @@ const App = {
     this.render()
     AUTH.init()
     NOTIF.init()
+
+    // Auto-sync: pull the latest from the sheet on open, push local edits.
+    if (this.state.authStatus === 'connected') {
+      setTimeout(() => this.autoSync({ pullFirst: true }), 1000)
+    }
+    window.addEventListener('online', () => {
+      if (this.state.settings.pendingSync) this.autoSync()
+    })
+  },
+
+  onConnected() {
+    this.autoSync({ pullFirst: true })
   },
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -78,12 +87,14 @@ const App = {
     const logs = DB.getLogs()
     logs[todayKey()] = this.state.today
     DB.saveLogs(logs)
+    this.queueSync()
   },
 
   savePastDay() {
     const logs = DB.getLogs()
     logs[this.state.viewingDate] = this.state.viewingDayData
     DB.saveLogs(logs)
+    this.queueSync()
   },
 
   // ── Tab routing ────────────────────────────────────────────────────────────
@@ -139,6 +150,8 @@ const App = {
     total++; if (day.steps > 0) done++
     total++; if (day.noSugar) done++
     total++; if (day.workout) done++
+    total++; if (day.protein) done++
+    total++; if (day.sleep) done++
     total++; if (day.breakfast) done++
     total++; if (day.lunch) done++
     total++; if (day.dinner) done++
@@ -180,6 +193,7 @@ const App = {
     if (!log) return null
     const anyLogged =
       log.water || log.steps > 0 || log.noSugar || log.workout ||
+      log.protein || log.sleep ||
       log.breakfast || log.lunch || log.dinner ||
       Object.values(log.habits || {}).some(v => v)
     if (!anyLogged) return null
@@ -262,6 +276,8 @@ const App = {
     const waterLabel = day.water ? day.water.replace('L', ' L') : '— L'
     const noSugarOn = day.noSugar
     const workoutOn = day.workout
+    const proteinOn = day.protein
+    const sleepOn = day.sleep
 
     const habitRows = habits.map(h => {
       const val = day.habits[h.id]
@@ -370,6 +386,28 @@ const App = {
           </div>
           <div style="font-size:15px;font-weight:800;">Workout</div>
           <div style="font-size:12px;color:var(--muted);font-weight:600;">Any training counts</div>
+        </div>
+
+        <div class="toggle-card ${proteinOn ? 'on' : ''}" onclick="App.toggle${prefix}('protein')">
+          <div class="toggle-card-top">
+            <span class="mi" style="font-size:22px;color:var(--accent)">egg_alt</span>
+            <div class="chk ${proteinOn ? 'on' : ''}">
+              ${proteinOn ? '<span class="mi fill" style="font-size:17px">check</span>' : ''}
+            </div>
+          </div>
+          <div style="font-size:15px;font-weight:800;">Protein meal</div>
+          <div style="font-size:12px;color:var(--muted);font-weight:600;">Hit your protein goal</div>
+        </div>
+
+        <div class="toggle-card ${sleepOn ? 'on' : ''}" onclick="App.toggle${prefix}('sleep')">
+          <div class="toggle-card-top">
+            <span class="mi" style="font-size:22px;color:var(--accent)">bedtime</span>
+            <div class="chk ${sleepOn ? 'on' : ''}">
+              ${sleepOn ? '<span class="mi fill" style="font-size:17px">check</span>' : ''}
+            </div>
+          </div>
+          <div style="font-size:15px;font-weight:800;">Sleep 6–8 hrs</div>
+          <div style="font-size:12px;color:var(--muted);font-weight:600;">Well-rested last night</div>
         </div>
       </div>
 
@@ -666,6 +704,7 @@ const App = {
     }
     const habits = [...this.state.habits, habit]
     DB.saveHabits(habits)
+    this.queueSync()
     this.setState({ habits, newHabitName: '', newHabitType: 'check' })
   },
 
@@ -678,10 +717,126 @@ const App = {
     this.setState({ habits })
   },
 
+  // ── Auto-sync engine ───────────────────────────────────────────────────────
+
+  _syncTimer: null,
+  _syncInFlight: false,
+  _syncAgain: false,
+
+  // Called after every local change — debounce, then push to the sheet.
+  queueSync() {
+    if (!this.state.settings.pendingSync) {
+      const settings = { ...this.state.settings, pendingSync: true }
+      DB.saveSettings(settings)
+      this.state.settings = settings
+    }
+    if (this.state.authStatus !== 'connected') return
+    clearTimeout(this._syncTimer)
+    this._syncTimer = setTimeout(() => this.autoSync(), 4000)
+  },
+
+  // Re-render only when the Sync tab is visible — a background sync must
+  // never rebuild the DOM while the user is typing on another tab.
+  _syncRender() {
+    if (this.state.tab === 'sync') this.render()
+  },
+
+  async autoSync({ pullFirst = false } = {}) {
+    if (this._syncInFlight) { this._syncAgain = true; return }
+    if (this.state.authStatus !== 'connected' || !navigator.onLine) return
+
+    this._syncInFlight = true
+    this.state.syncing = true
+    this.state.syncMsg = null
+    this._syncRender()
+
+    try {
+      const token = await AUTH.getValidToken()
+      if (!token) throw new Error('Google session expired — tap Sync now to reconnect.')
+
+      const spreadsheetId = await this._resolveSheet(token)
+      if (pullFirst) await this._pullMerge(token, spreadsheetId)
+      await SYNC.upload(token, spreadsheetId)
+
+      const settings = { ...this.state.settings, lastSyncedAt: Date.now(), pendingSync: false }
+      DB.saveSettings(settings)
+      this.state.settings = settings
+      this.state.syncMsg = { type: 'ok', text: '✓ Synced with Google Sheets.' }
+    } catch (err) {
+      console.error(err)
+      this.state.syncMsg = { type: 'err', text: 'Sync failed: ' + err.message }
+    }
+
+    this._syncInFlight = false
+    this.state.syncing = false
+    this._syncRender()
+    if (this._syncAgain) {
+      this._syncAgain = false
+      this.autoSync()
+    }
+  },
+
+  // One sheet everywhere: stored ID → pasted URL → Drive lookup → create.
+  async _resolveSheet(token) {
+    let spreadsheetId = this.state.settings.spreadsheetId
+    if (!spreadsheetId) spreadsheetId = this._extractSheetId(this.state.syncSheetUrl)
+    if (!spreadsheetId) spreadsheetId = await SYNC.findSpreadsheet(token)
+    if (!spreadsheetId) spreadsheetId = await SYNC.createSpreadsheet(token)
+    if (spreadsheetId !== this.state.settings.spreadsheetId) {
+      const settings = { ...this.state.settings, spreadsheetId }
+      DB.saveSettings(settings)
+      this.state.settings = settings
+    }
+    return spreadsheetId
+  },
+
+  // Merge cloud → local: take cloud days this device doesn't have data for;
+  // when both have data, local wins (this is the device being edited) and
+  // the following upload pushes it back up.
+  async _pullMerge(token, spreadsheetId) {
+    const data = await SYNC.download(token, spreadsheetId)
+    const localLogs = DB.getLogs()
+    let changed = false
+
+    for (const [date, cloudDay] of Object.entries(data.logs || {})) {
+      const localDay = localLogs[date]
+      if (!localDay || !this._hasAnyData(localDay)) {
+        localLogs[date] = cloudDay
+        changed = true
+      }
+    }
+
+    // Habits: union by name so a fresh device inherits the cloud list
+    const localHabits = DB.getHabits()
+    const cloudHabits = data.habits || []
+    if (localHabits.length === 0 && cloudHabits.length > 0) {
+      DB.saveHabits(cloudHabits)
+      this.state.habits = cloudHabits
+    } else if (cloudHabits.length > 0) {
+      const names = new Set(localHabits.map(h => h.name.toLowerCase()))
+      const merged = [...localHabits, ...cloudHabits.filter(h => !names.has(h.name.toLowerCase()))]
+      if (merged.length !== localHabits.length) {
+        DB.saveHabits(merged)
+        this.state.habits = merged
+      }
+    }
+
+    if (changed) {
+      DB.saveLogs(localLogs)
+      const todayLog = localLogs[todayKey()]
+      if (todayLog) this.state.today = todayLog
+      if (this.state.tab !== 'sync') this.render()
+    }
+  },
+
+  syncNow() {
+    this.autoSync({ pullFirst: true })
+  },
+
   // ── SYNC tab ───────────────────────────────────────────────────────────────
 
   renderSync() {
-    const { authStatus, userEmail, settings, syncing, syncMsg, syncConflicts, syncMergePreview } = this.state
+    const { authStatus, userEmail, settings, syncing, syncMsg } = this.state
     const connected = authStatus === 'connected'
     const needsClientId = AUTH.CLIENT_ID === 'YOUR_CLIENT_ID_HERE'
 
@@ -697,16 +852,14 @@ const App = {
         <h3>⚙️ Set up Google Sync</h3>
         <ol>
           <li>Go to <strong>console.cloud.google.com</strong> → New project → name it <code>SelfMade</code></li>
-          <li>APIs &amp; Services → Library → search <strong>Google Sheets API</strong> → Enable</li>
-          <li>OAuth consent screen → External → add scope <code>spreadsheets</code> → add your email as test user</li>
+          <li>APIs &amp; Services → Library → enable <strong>Google Sheets API</strong> and <strong>Google Drive API</strong></li>
+          <li>OAuth consent screen → External → add scopes <code>spreadsheets</code> + <code>drive.file</code> → add your email as test user</li>
           <li>Credentials → <strong>Create OAuth client ID</strong> → Web application</li>
           <li>Authorized JavaScript origins: <code>${escHtml(location.origin)}</code></li>
           <li>Copy the <strong>Client ID</strong> → open <code>js/auth.js</code> → replace <code>YOUR_CLIENT_ID_HERE</code></li>
           <li>Reload the app and tap <strong>Connect Google</strong></li>
         </ol>
       </div>`
-
-    const conflictsSection = syncConflicts ? this.renderConflictsSection(syncConflicts, syncMergePreview) : ''
 
     const connectedCard = `
       <div class="card" style="display:flex;align-items:center;gap:14px;">
@@ -726,44 +879,44 @@ const App = {
         <div class="row-sep" style="border-bottom:1px solid var(--divider);">
           <div>
             <div style="font-size:15px;font-weight:800;">Auto-sync</div>
-            <div style="font-size:12px;color:var(--muted);font-weight:600;">Upload when back online</div>
+            <div style="font-size:12px;color:var(--muted);font-weight:600;">One sheet, synced whenever you're online</div>
           </div>
-          <button class="t-switch ${settings.autoSync ? 'on' : 'off'}" onclick="App.toggleAutoSync()"></button>
+          <div style="font-size:13px;font-weight:800;color:var(--accent);">On</div>
         </div>
         <div class="row-sep">
           <div>
             <div style="font-size:15px;font-weight:800;">Last synced</div>
             <div style="font-size:12px;color:var(--muted);font-weight:600;">${lastSync}</div>
           </div>
-          <div style="font-size:13px;font-weight:800;color:${connected ? 'var(--accent)' : 'var(--muted)'};">
-            ${connected ? 'Ready' : '—'}
+          <div style="font-size:13px;font-weight:800;color:${settings.pendingSync ? '#8A5A00' : 'var(--accent)'};">
+            ${syncing ? 'Syncing…' : settings.pendingSync ? 'Pending' : 'Up to date'}
           </div>
         </div>
       </div>
 
       ${!settings.spreadsheetId ? `
       <div class="card" style="margin-top:12px;padding:14px 16px;display:flex;flex-direction:column;gap:8px;">
-        <div style="font-size:13px;font-weight:800;color:var(--dim);">Link existing sheet</div>
+        <div style="font-size:13px;font-weight:800;color:var(--dim);">Link existing sheet (optional)</div>
         <div style="font-size:12px;color:var(--muted);font-weight:600;line-height:1.5;">
-          No sheet linked yet. Upload to create one, or paste your existing sheet URL to download from it.
+          Your sheet is found automatically. Only paste a URL here if you want to use a specific one.
         </div>
         <input type="text" value="${escHtml(this.state.syncSheetUrl)}" placeholder="Paste Google Sheet URL…"
                oninput="App.onSheetUrl(this.value)"
                style="font-size:13px;">
       </div>` : ''}
 
-      ${syncConflicts ? conflictsSection : `
       <button class="btn-primary" style="margin-top:16px;height:52px;font-size:16px;border-radius:14px;"
-              onclick="App.doSync('upload')" ${syncing ? 'disabled' : ''}>
-        ${syncing ? '<div class="spinner"></div> Syncing…' : '<span class="mi" style="font-size:21px;">cloud_upload</span> Upload to Sheets'}
+              onclick="App.syncNow()" ${syncing ? 'disabled' : ''}>
+        ${syncing ? '<div class="spinner"></div> Syncing…' : '<span class="mi" style="font-size:21px;">sync</span> Sync now'}
       </button>
-      <button class="btn-primary" style="margin-top:8px;height:52px;font-size:16px;border-radius:14px;background:#F2F2EF;color:var(--text);"
-              onclick="App.doSync('download')" ${syncing ? 'disabled' : ''}>
-        ${syncing ? '<div class="spinner"></div>' : '<span class="mi" style="font-size:21px;color:var(--accent);">cloud_download</span> Download from Sheets'}
-      </button>
-      `}
 
-      <button onclick="App.disconnectGoogle()" style="margin-top:12px;width:100%;border:none;background:transparent;color:var(--muted);font-size:13px;font-weight:700;cursor:pointer;padding:8px;">
+      ${settings.spreadsheetId ? `
+      <a href="https://docs.google.com/spreadsheets/d/${escHtml(settings.spreadsheetId)}" target="_blank" rel="noopener"
+         style="display:block;margin-top:12px;text-align:center;color:var(--accent);font-size:13px;font-weight:800;text-decoration:none;padding:8px;">
+        Open Google Sheet ↗
+      </a>` : ''}
+
+      <button onclick="App.disconnectGoogle()" style="margin-top:4px;width:100%;border:none;background:transparent;color:var(--muted);font-size:13px;font-weight:700;cursor:pointer;padding:8px;">
         Disconnect Google account
       </button>`
 
@@ -786,7 +939,7 @@ const App = {
     return `
       <div class="page-title">Sync</div>
       <div style="font-size:13px;color:var(--muted);font-weight:600;margin-top:4px;">
-        Everything is stored on your device — works fully offline. Sync uploads your log to Google Sheets.
+        Everything is stored on your device — works fully offline. When online, your log auto-syncs to one Google Sheet.
       </div>
 
       <div style="margin-top:16px;">
@@ -832,163 +985,9 @@ const App = {
   _hasAnyData(day) {
     if (!day) return false
     return !!(day.water || day.steps > 0 || day.noSugar || day.workout ||
+      day.protein || day.sleep ||
       day.breakfast || day.lunch || day.dinner ||
       Object.values(day.habits || {}).some(v => v))
-  },
-
-  _daysEqual(a, b) {
-    if (!a && !b) return true
-    if (!a || !b) return false
-    return (a.water || '') === (b.water || '') &&
-      Number(a.steps || 0) === Number(b.steps || 0) &&
-      !!a.noSugar === !!b.noSugar &&
-      !!a.workout === !!b.workout &&
-      (a.breakfast || '') === (b.breakfast || '') &&
-      (a.lunch || '') === (b.lunch || '') &&
-      (a.dinner || '') === (b.dinner || '') &&
-      this._habitsEqual(a.habits || {}, b.habits || {})
-  },
-
-  _habitsEqual(a, b) {
-    const keys = new Set([...Object.keys(a), ...Object.keys(b)])
-    for (const k of keys) {
-      if (String(a[k] || '') !== String(b[k] || '')) return false
-    }
-    return true
-  },
-
-  _getDiffs(local, cloud) {
-    const diffs = []
-    const fmt = v => v === true || v === 'Yes' ? 'Yes' : v === false || v === 'No' ? 'No' : (String(v || '') || '—')
-    const fields = [
-      { key: 'water', label: 'Water' },
-      { key: 'steps', label: 'Steps' },
-      { key: 'noSugar', label: 'No Sugar' },
-      { key: 'workout', label: 'Workout' },
-      { key: 'breakfast', label: 'Breakfast' },
-      { key: 'lunch', label: 'Lunch' },
-      { key: 'dinner', label: 'Dinner' },
-    ]
-    for (const f of fields) {
-      const lv = String(local[f.key] || ''), cv = String(cloud[f.key] || '')
-      if (lv !== cv) diffs.push({ field: f.label, localVal: fmt(local[f.key]), cloudVal: fmt(cloud[f.key]) })
-    }
-    const localH = local.habits || {}, cloudH = cloud.habits || {}
-    const habitKeys = new Set([...Object.keys(localH), ...Object.keys(cloudH)])
-    for (const id of habitKeys) {
-      if (String(localH[id] || '') !== String(cloudH[id] || '')) {
-        const habit = this.state.habits.find(h => h.id === id)
-        const label = habit ? (habit.name.length > 12 ? habit.name.slice(0, 11) + '…' : habit.name) : id
-        diffs.push({ field: label, localVal: fmt(localH[id]), cloudVal: fmt(cloudH[id]) })
-      }
-    }
-    return diffs
-  },
-
-  renderConflictsSection(conflicts, preview) {
-    const allResolved = conflicts.every(c => c.choice)
-    const previewMsg = preview
-      ? `${preview.added} day${preview.added !== 1 ? 's' : ''} merged automatically — ${preview.conflicts} conflict${preview.conflicts !== 1 ? 's' : ''} need your review.`
-      : `${conflicts.length} conflict${conflicts.length !== 1 ? 's' : ''} need your review.`
-
-    const cards = conflicts.map((c, idx) => {
-      const [y, m, d] = c.date.split('-').map(Number)
-      const dateLabel = new Date(y, m - 1, d).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })
-      const diffs = this._getDiffs(c.local, c.cloud)
-      const diffRows = diffs.map(df => `
-        <div style="display:grid;grid-template-columns:90px 1fr 1fr;gap:6px;padding:7px 0;border-top:1px solid var(--divider);font-size:12px;align-items:center;">
-          <span style="color:var(--muted);font-weight:700;">${escHtml(df.field)}</span>
-          <span style="font-weight:700;${c.choice === 'local' ? 'color:var(--accent)' : ''}">${escHtml(df.localVal)}</span>
-          <span style="font-weight:700;${c.choice === 'cloud' ? 'color:var(--accent)' : ''}">${escHtml(df.cloudVal)}</span>
-        </div>`).join('')
-
-      return `
-        <div class="card" style="margin-top:8px;padding:0;overflow:hidden;">
-          <div style="padding:12px 14px 8px;display:flex;align-items:center;justify-content:space-between;">
-            <span style="font-size:14px;font-weight:800;">${escHtml(dateLabel)}</span>
-            ${c.choice ? `<span style="font-size:11px;font-weight:800;padding:3px 8px;border-radius:6px;background:var(--accent-light);color:var(--accent);">${c.choice === 'local' ? 'KEPT LOCAL' : 'USE CLOUD'}</span>` : ''}
-          </div>
-          <div style="padding:0 14px 4px;">
-            <div style="display:grid;grid-template-columns:90px 1fr 1fr;gap:6px;padding-bottom:4px;">
-              <span style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Field</span>
-              <span style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Local</span>
-              <span style="font-size:10px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.06em;">Cloud</span>
-            </div>
-            ${diffRows}
-          </div>
-          <div style="display:flex;gap:8px;padding:12px 14px;">
-            <button onclick="App.resolveConflict(${idx}, 'local')"
-              style="flex:1;height:36px;border-radius:10px;border:2px solid ${c.choice === 'local' ? 'var(--accent)' : 'var(--border)'};background:${c.choice === 'local' ? 'var(--accent-light)' : 'transparent'};color:${c.choice === 'local' ? 'var(--accent)' : 'var(--dim)'};font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;">
-              Keep Local
-            </button>
-            <button onclick="App.resolveConflict(${idx}, 'cloud')"
-              style="flex:1;height:36px;border-radius:10px;border:2px solid ${c.choice === 'cloud' ? 'var(--accent)' : 'var(--border)'};background:${c.choice === 'cloud' ? 'var(--accent-light)' : 'transparent'};color:${c.choice === 'cloud' ? 'var(--accent)' : 'var(--dim)'};font-size:13px;font-weight:800;cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;">
-              Use Cloud
-            </button>
-          </div>
-        </div>`
-    }).join('')
-
-    return `
-      <div style="margin-top:16px;">
-        <div style="font-size:13px;font-weight:700;color:#8A5A00;background:#FFF3CD;border:1px solid #F0D060;border-radius:var(--radius-sm);padding:12px 14px;">
-          <span class="mi" style="font-size:16px;vertical-align:middle;margin-right:6px;">merge_type</span>${escHtml(previewMsg)}
-        </div>
-        ${cards}
-        <div style="display:flex;gap:8px;margin-top:12px;">
-          <button onclick="App.applyMerge('local')"
-            style="flex:1;height:40px;border-radius:10px;border:1px solid var(--border);background:var(--input);color:var(--dim);font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;">
-            All Local
-          </button>
-          <button onclick="App.applyMerge('cloud')"
-            style="flex:1;height:40px;border-radius:10px;border:1px solid var(--border);background:var(--input);color:var(--dim);font-size:12px;font-weight:800;cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent;">
-            All Cloud
-          </button>
-          <button onclick="App.applyMerge(null)" ${!allResolved ? 'disabled' : ''}
-            style="flex:2;height:40px;border-radius:10px;border:none;background:${allResolved ? 'var(--accent)' : 'var(--border)'};color:${allResolved ? '#fff' : 'var(--muted)'};font-size:13px;font-weight:800;cursor:${allResolved ? 'pointer' : 'not-allowed'};font-family:inherit;-webkit-tap-highlight-color:transparent;">
-            Apply (${conflicts.filter(c => c.choice).length}/${conflicts.length})
-          </button>
-        </div>
-      </div>`
-  },
-
-  resolveConflict(idx, choice) {
-    const syncConflicts = this.state.syncConflicts.map((c, i) =>
-      i === idx ? { ...c, choice } : c
-    )
-    this.setState({ syncConflicts })
-  },
-
-  applyMerge(bulkChoice) {
-    const conflicts = this.state.syncConflicts
-    const logs = DB.getLogs()
-
-    for (const conflict of conflicts) {
-      const choice = bulkChoice || conflict.choice || 'local'
-      if (choice === 'cloud') {
-        logs[conflict.date] = conflict.cloud
-      }
-    }
-
-    if (this.state.syncConflictHabits) {
-      DB.saveHabits(this.state.syncConflictHabits)
-      this.state.habits = this.state.syncConflictHabits
-    }
-
-    DB.saveLogs(logs)
-    const todayLog = logs[todayKey()]
-    if (todayLog) this.state.today = todayLog
-
-    const settings = { ...this.state.settings, lastSyncedAt: Date.now() }
-    DB.saveSettings(settings)
-
-    this.setState({
-      syncConflicts: null,
-      syncConflictHabits: null,
-      syncMergePreview: null,
-      settings,
-      syncMsg: { type: 'ok', text: '✓ Merge complete. All conflicts resolved.' }
-    })
   },
 
   // ── Notification card ──────────────────────────────────────────────────────
@@ -1042,125 +1041,6 @@ const App = {
     }
   },
 
-  // ── Sync actions ───────────────────────────────────────────────────────────
-
-  toggleAutoSync() {
-    const settings = { ...this.state.settings, autoSync: !this.state.settings.autoSync }
-    DB.saveSettings(settings)
-    this.setState({ settings })
-  },
-
-  async doSync(direction) {
-    if (direction === 'download') return this.doDownload()
-
-    // Upload
-    this.setState({ syncing: true, syncMsg: null })
-    try {
-      let token = AUTH.getToken()
-      if (!token) {
-        this.setState({ syncing: false, syncMsg: { type: 'err', text: 'Token expired. Please reconnect Google.' } })
-        return
-      }
-
-      let { spreadsheetId } = this.state.settings
-      if (!spreadsheetId) {
-        spreadsheetId = await SYNC.createSpreadsheet(token)
-        const settings = { ...this.state.settings, spreadsheetId }
-        DB.saveSettings(settings)
-        this.state.settings = settings
-      }
-
-      await SYNC.upload(token, spreadsheetId)
-
-      const settings = { ...this.state.settings, lastSyncedAt: Date.now() }
-      DB.saveSettings(settings)
-      this.setState({ syncing: false, settings, syncMsg: { type: 'ok', text: '✓ Uploaded to Google Sheets.' } })
-    } catch (err) {
-      console.error(err)
-      this.setState({ syncing: false, syncMsg: { type: 'err', text: 'Sync failed: ' + err.message } })
-    }
-  },
-
-  async doDownload() {
-    this.setState({ syncing: true, syncMsg: null, syncConflicts: null, syncMergePreview: null })
-    try {
-      let token = AUTH.getToken()
-      if (!token) {
-        this.setState({ syncing: false, syncMsg: { type: 'err', text: 'Token expired. Please reconnect Google.' } })
-        return
-      }
-
-      let { spreadsheetId } = this.state.settings
-      if (!spreadsheetId) {
-        // Try to extract from a pasted URL
-        spreadsheetId = this._extractSheetId(this.state.syncSheetUrl)
-        if (!spreadsheetId) {
-          this.setState({ syncing: false, syncMsg: { type: 'err', text: 'Paste your Google Sheet URL below and try again.' } })
-          return
-        }
-        // Save the found ID so future syncs work
-        const settings = { ...this.state.settings, spreadsheetId }
-        DB.saveSettings(settings)
-        this.state.settings = settings
-      }
-
-      const data = await SYNC.download(token, spreadsheetId)
-      const localLogs = DB.getLogs()
-      const cloudLogs = data.logs || {}
-
-      // Split cloud days into conflict-free and conflicting
-      const newFromCloud = {}
-      const conflicts = []
-
-      for (const [date, cloudDay] of Object.entries(cloudLogs)) {
-        const localDay = localLogs[date]
-        if (!localDay || !this._hasAnyData(localDay)) {
-          // Cloud has data, local is empty → take cloud, no conflict
-          newFromCloud[date] = cloudDay
-        } else if (!this._daysEqual(localDay, cloudDay)) {
-          // Both have data and they differ → conflict
-          conflicts.push({ date, local: localDay, cloud: cloudDay, choice: null })
-        }
-        // else: identical → nothing to do
-      }
-
-      // Apply conflict-free cloud days immediately
-      const mergedLogs = { ...localLogs, ...newFromCloud }
-      DB.saveLogs(mergedLogs)
-
-      const settings = { ...this.state.settings, lastSyncedAt: Date.now() }
-      DB.saveSettings(settings)
-
-      if (conflicts.length === 0) {
-        // Fully resolved — apply habits too
-        if (data.habits && data.habits.length > 0) {
-          DB.saveHabits(data.habits)
-          this.state.habits = data.habits
-        }
-        const todayLog = mergedLogs[todayKey()]
-        if (todayLog) this.state.today = todayLog
-        const addedCount = Object.keys(newFromCloud).length
-        this.setState({
-          syncing: false,
-          settings,
-          syncMsg: { type: 'ok', text: `✓ Merge complete. ${addedCount} day${addedCount !== 1 ? 's' : ''} added from cloud.` }
-        })
-      } else {
-        // Conflicts need resolution — keep habits staged
-        this.setState({
-          syncing: false,
-          settings,
-          syncConflicts: conflicts,
-          syncConflictHabits: data.habits || null,
-          syncMergePreview: { added: Object.keys(newFromCloud).length, conflicts: conflicts.length }
-        })
-      }
-    } catch (err) {
-      console.error(err)
-      this.setState({ syncing: false, syncMsg: { type: 'err', text: 'Download failed: ' + err.message } })
-    }
-  },
-
   async installPWA() {
     if (!_installPrompt) return
     _installPrompt.prompt()
@@ -1173,7 +1053,7 @@ const App = {
     AUTH.disconnect()
     const settings = { ...this.state.settings, spreadsheetId: null }
     DB.saveSettings(settings)
-    this.setState({ authStatus: null, userEmail: null, settings, syncConflicts: null, syncMergePreview: null })
+    this.setState({ authStatus: null, userEmail: null, settings })
   },
 }
 

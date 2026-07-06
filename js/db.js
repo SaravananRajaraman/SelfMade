@@ -14,9 +14,9 @@ const DB = {
   getSettings() {
     try {
       return JSON.parse(localStorage.getItem('selfmade_settings') || 'null') || {
-        autoSync: false, spreadsheetId: null, lastSyncedAt: null
+        spreadsheetId: null, lastSyncedAt: null, pendingSync: false
       }
-    } catch { return { autoSync: false, spreadsheetId: null, lastSyncedAt: null } }
+    } catch { return { spreadsheetId: null, lastSyncedAt: null, pendingSync: false } }
   },
   saveSettings(s) {
     localStorage.setItem('selfmade_settings', JSON.stringify(s))

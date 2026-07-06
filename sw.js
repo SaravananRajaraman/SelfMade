@@ -1,4 +1,6 @@
-const CACHE = 'selfmade-v6'
+importScripts('./js/notif-shared.js')
+
+const CACHE = 'selfmade-v7'
 const ASSETS = [
   './',
   './index.html',
@@ -7,6 +9,7 @@ const ASSETS = [
   './js/auth.js',
   './js/sync.js',
   './js/app.js',
+  './js/notif-shared.js',
   './js/notifications.js',
   './icons/icon.svg',
   './icons/icon-192.png',
@@ -46,6 +49,14 @@ self.addEventListener('fetch', e => {
       }).catch(() => cached)
     })
   )
+})
+
+// Fires while the app is closed (installed PWA on Android Chrome) so
+// reminders arrive without the page being open.
+self.addEventListener('periodicsync', e => {
+  if (e.tag === 'selfmade-reminders') {
+    e.waitUntil(showDueNotifications(self.registration))
+  }
 })
 
 self.addEventListener('notificationclick', e => {

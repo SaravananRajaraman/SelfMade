@@ -3,6 +3,8 @@
 
 const SYNC = {
   BASE: 'https://sheets.googleapis.com/v4/spreadsheets',
+  DRIVE: 'https://www.googleapis.com/drive/v3/files',
+  SHEET_TITLE: 'SelfMade Health Log',
 
   _headers(token) {
     return { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' }
@@ -19,10 +21,27 @@ const SYNC = {
     return method === 'DELETE' ? null : resp.json()
   },
 
+  // Find the sheet this app created (on any device) so we never make a
+  // second one. drive.file scope only exposes files created by this app.
+  async findSpreadsheet(token) {
+    const q = encodeURIComponent(
+      `name = '${this.SHEET_TITLE}' and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`
+    )
+    let data
+    try {
+      data = await this._req(token, 'GET',
+        `${this.DRIVE}?q=${q}&orderBy=createdTime&fields=files(id,name)&pageSize=5`)
+    } catch (err) {
+      // Don't fall through to createSpreadsheet — that would duplicate sheets
+      throw new Error('Could not look up your sheet. Enable the "Google Drive API" in your Google Cloud project, then reconnect. (' + err.message + ')')
+    }
+    return (data.files && data.files.length) ? data.files[0].id : null
+  },
+
   // Create a new spreadsheet and return its ID
   async createSpreadsheet(token) {
     const body = {
-      properties: { title: 'SelfMade Health Log' },
+      properties: { title: this.SHEET_TITLE },
       sheets: [
         { properties: { title: 'Daily Log' } },
         { properties: { title: 'Habits' } },
@@ -31,6 +50,8 @@ const SYNC = {
     const data = await this._req(token, 'POST', this.BASE, body)
     return data.spreadsheetId
   },
+
+  FIXED_COLS: ['Date','Water','Steps','No-Sugar','Workout','Protein','Sleep','Breakfast','Lunch','Dinner'],
 
   // Upload all local data → Sheets (full overwrite)
   async upload(token, spreadsheetId) {
@@ -41,7 +62,7 @@ const SYNC = {
     const habitCols = habits.map(h => h.name)
 
     // Build Daily Log rows
-    const logRows = [['Date','Water','Steps','No-Sugar','Workout','Breakfast','Lunch','Dinner', ...habitCols]]
+    const logRows = [[...this.FIXED_COLS, ...habitCols]]
     for (const [date, log] of Object.entries(logs).sort()) {
       const row = [
         date,
@@ -49,6 +70,8 @@ const SYNC = {
         log.steps || 0,
         log.noSugar ? 'Yes' : 'No',
         log.workout ? 'Yes' : 'No',
+        log.protein ? 'Yes' : 'No',
+        log.sleep ? 'Yes' : 'No',
         log.breakfast || '',
         log.lunch || '',
         log.dinner || '',
@@ -90,20 +113,27 @@ const SYNC = {
       type: r[2] === 'text' ? 'text' : 'check',
     }))
 
-    // Parse daily logs
+    // Parse daily logs. Columns are looked up by header name so sheets
+    // written before Protein/Sleep existed still parse correctly.
     const logRows = (logData.values || [])
     const header = logRows[0] || []
-    // Dynamic habit column indices
-    const habitStartIdx = 8
+    const fixed = new Set(this.FIXED_COLS)
+    const col = name => header.indexOf(name)
+    const idx = {
+      water: col('Water'), steps: col('Steps'), noSugar: col('No-Sugar'),
+      workout: col('Workout'), protein: col('Protein'), sleep: col('Sleep'),
+      breakfast: col('Breakfast'), lunch: col('Lunch'), dinner: col('Dinner'),
+    }
+    const cell = (row, i) => i >= 0 ? (row[i] || '') : ''
     const logs = {}
 
     for (const row of logRows.slice(1)) {
       const date = row[0]
       if (!date) continue
       const habitValues = {}
-      for (let i = habitStartIdx; i < header.length; i++) {
-        const habitName = header[i]
-        const habit = habits.find(h => h.name === habitName)
+      for (let i = 1; i < header.length; i++) {
+        if (fixed.has(header[i])) continue
+        const habit = habits.find(h => h.name === header[i])
         if (habit) {
           const raw = row[i] || ''
           habitValues[habit.id] = habit.type === 'check'
@@ -112,13 +142,15 @@ const SYNC = {
         }
       }
       logs[date] = {
-        water: row[1] || '',
-        steps: parseInt(row[2] || '0', 10) || 0,
-        noSugar: row[3] === 'Yes',
-        workout: row[4] === 'Yes',
-        breakfast: row[5] || '',
-        lunch: row[6] || '',
-        dinner: row[7] || '',
+        water: cell(row, idx.water),
+        steps: parseInt(cell(row, idx.steps) || '0', 10) || 0,
+        noSugar: cell(row, idx.noSugar) === 'Yes',
+        workout: cell(row, idx.workout) === 'Yes',
+        protein: cell(row, idx.protein) === 'Yes',
+        sleep: cell(row, idx.sleep) === 'Yes',
+        breakfast: cell(row, idx.breakfast),
+        lunch: cell(row, idx.lunch),
+        dinner: cell(row, idx.dinner),
         habits: habitValues,
       }
     }
